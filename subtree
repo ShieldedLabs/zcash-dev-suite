@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+
+# Subtree management tool for zcash-dev-suite
+set -euo pipefail
+
+set +x
+
+usage() {
+  echo "Usage: $0 <command> [options]"
+  echo "Commands:"
+  echo "  add <prefix> <remote-url> <branch>  Add a new subtree and track remote"
+  echo "  ls                                  List subtree-related commits"
+  echo "  pull <prefix> <branch>              Pull updates for a subtree from its tracked remote"
+  echo "  diff <prefix> <branch>              Compare local subtree with remote"
+  echo "  branch <prefix> [branch-name]       Create a split branch for a subtree"
+  echo "  pr <prefix>                         Create a PR for a subtree update"
+  echo "  rm <prefix>                         Remove a subtree and its remote"
+  echo ""
+  exit 1
+}
+
+if [ $# -eq 0 ]; then
+    usage
+fi
+
+command="$1"
+
+## CREATE
+if [ "$command" == "add" ]; then
+    if [ $# -ne 4 ]; then
+        usage
+    fi
+
+    prefix="$2"
+    remote_url="$3"
+    branch="$4"
+
+    echo "Adding subtree '$prefix' from $remote_url@$branch"
+    git subtree add --prefix="$prefix" "$remote_url" "$branch" --squash
+
+    echo "Tracking remote as '$prefix-upstream'"
+    git remote add "$prefix-upstream" "$remote_url" || echo "Remote already exists: $prefix-upstream"
+
+    exit 0
+fi
+
+## LIST
+if [ "$command" == "ls" ]; then
+  if [ $# -gt 1 ]; then
+    usage
+  fi
+
+  table_format="%-20s %-55s %-20s %-12s"
+
+  printf "$table_format\n" "Prefix" "Remote URL" "Subtree Split" "Local Commit"
+  echo "------------------------------------------------------------------------------------------------------------------"
+
+  git log --grep="^git-subtree-dir:" --pretty=format:"COMMIT:%H%n%B" | \
+  awk '
+    BEGIN { RS="COMMIT:"; ORS="" }
+    {
+      split($0, lines, "\n")
+      local_commit = lines[1]
+      prefix = ""; split_commit = ""
+      for (i = 2; i <= length(lines); i++) {
+        if (lines[i] ~ /^git-subtree-dir:/) {
+          split(lines[i], d, ": "); prefix = d[2]
+        }
+        if (lines[i] ~ /^git-subtree-split:/) {
+          split(lines[i], s, ": "); split_commit = s[2]
+        }
+      }
+      if (prefix != "" && split_commit != "" && !(prefix in seen)) {
+        seen[prefix] = 1
+        printf "%s %s %s\n", prefix, substr(split_commit, 1, 10), substr(local_commit, 1, 10)
+      }
+    }
+  ' | while read -r prefix split local_commit; do
+    if [ -d "$prefix" ]; then
+      remote="${prefix}-upstream"
+      url=$(git remote get-url "$remote" 2>/dev/null || echo "unknown")
+      printf "$table_format\n" "$prefix" "$url" "$split" "$local_commit"
+    fi
+  done
+
+  exit 0
+fi
+
+## PULL / UPDATE
+if [ "$command" == "pull" ] || [ "$command" == "update" ]; then
+    if [ $# -ne 3 ]; then
+        usage
+    fi
+
+    prefix="$2"
+    branch="$3"
+    remote_name="$prefix-upstream"
+
+    # Fetch latest from the tracked remote
+    echo "Fetching from $remote_name..."
+    git fetch "$remote_name"
+
+    echo "Pulling subtree '$prefix' from $remote_name/$branch"
+    git subtree pull --prefix="$prefix" "$remote_name" "$branch" --squash
+
+    exit 0
+fi
+
+## DIFF
+if [ "$command" == "diff" ]; then
+  if [ $# -ne 3 ]; then
+    echo "Usage: $0 diff <prefix> <branch>"
+    exit 1
+  fi
+
+  prefix="$2"
+  branch="$3"
+  remote="${prefix}-upstream"
+
+  echo "Fetching latest from $remote..."
+  git fetch "$remote" --quiet
+
+  echo "Comparing local '$prefix/' against $remote/$branch..."
+
+  tmpdir=$(mktemp -d)
+  trap "rm -rf $tmpdir" EXIT
+
+  git archive "$remote/$branch" | tar -x -C "$tmpdir"
+
+  diff -ruN "$tmpdir" "$prefix" | ${PAGER:-less}
+
+  exit 0
+fi
+
+## BRANCH
+if [ "$command" == "branch" ]; then
+  if [ $# -lt 2 ] || [ $# -gt 3 ]; then
+    usage
+  fi
+
+  prefix="$2"
+  remote="${prefix}-upstream"
+  repo_slug=$(git remote get-url "$remote" 2>/dev/null | sed -E 's|.*github.com[:/](.*)\.git|\1|')
+  branch="${3:-subtree-${prefix}-patch}"
+
+  if git show-ref --quiet refs/heads/"$branch"; then
+    echo "Branch '$branch' already exists. Use a different name or delete the old one first."
+    exit 1
+  fi
+
+  echo "Creating split branch '$branch' from subtree '$prefix'..."
+  git subtree split --prefix="$prefix" -b "$branch"
+
+  echo "Created split branch: $branch"
+  echo "To push and open a PR:"
+  echo "  git push -u $remote $branch"
+  echo "  gh pr create --repo $repo_slug --head \"$branch\""
+
+  exit 0
+fi
+
+## PR
+if [ "$command" == "pr" ]; then
+  if [ $# -ne 2 ]; then
+    usage
+  fi
+
+  prefix="$2"
+  branch="subtree-${prefix}-patch"
+  remote="${prefix}-upstream"
+  repo_slug=$(git remote get-url "$remote" 2>/dev/null | sed -E 's|.*github.com[:/](.*)\.git|\1|')
+
+  # Check that GitHub CLI is available
+  if ! command -v gh &> /dev/null; then
+    echo "❌ GitHub CLI (gh) not found. Please install it to use 'subtree pr'."
+    exit 1
+  fi
+
+  echo "Creating split branch '$branch' from subtree '$prefix'..."
+  git subtree split --prefix="$prefix" -b "$branch"
+
+  echo "Pushing to GitHub..."
+  git push -u "$remote" "$branch:$branch"
+
+  echo "Opening PR via GitHub CLI..."
+  gh pr create --repo "$repo_slug" \
+               --head "$branch" \
+               --title "Subtree update for $prefix" \
+               --body "This PR includes changes made in the \`$prefix/\` subtree." \
+               --draft
+
+  exit 0
+fi
+
+## DELETE
+if [ "$command" == "rm" ]; then
+    if [ $# -ne 2 ]; then
+        usage
+    fi
+
+    prefix="$2"
+    remote_name="$prefix-upstream"
+
+    echo "Are you sure you want to delete the subtree '$prefix' and remote '$remote_name'? [y/N]"
+    read -r confirm
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        echo "Aborted."
+        exit 1
+    fi
+
+    echo "Removing subtree folder '$prefix/'..."
+    git rm -r "$prefix"
+    git commit -m "Removed subtree '$prefix' and unlinked '$remote_name'"
+
+    if git remote get-url "$remote_name" > /dev/null 2>&1; then
+        echo "Removing remote '$remote_name'..."
+        git remote remove "$remote_name"
+    else
+        echo "Remote '$remote_name' not found. Skipping."
+    fi
+
+    exit 0
+fi
+
+echo "Unknown command: $command"
+usage
