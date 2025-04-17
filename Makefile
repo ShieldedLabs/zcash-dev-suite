@@ -1,6 +1,4 @@
-# Dependencies: see zips/zip-guide.rst and protocol/README.rst
-
-MARKDOWN_OPTION?=--mmd
+# Dependencies: see zip-guide.rst and protocol/README.rst
 
 .PHONY: all-zips all tag-release protocol all-protocol discard
 all-zips: .Makefile.uptodate
@@ -21,30 +19,36 @@ tag-release:
 protocol:
 	$(MAKE) -C protocol protocol
 
-protocol-dark:
-	$(MAKE) -C protocol protocol-dark
-
 all-protocol:
 	$(MAKE) -C protocol all
-
-all-specs: all-zips
-	$(MAKE) -C protocol all-specs
 
 discard:
 	git checkout -- 'rendered/*.html' 'README.rst' 'rendered/protocol/*.pdf'
 
-.Makefile.uptodate: Makefile render.sh
+.Makefile.uptodate: Makefile edithtml.sh
 	$(MAKE) clean
 	touch .Makefile.uptodate
 
-rendered/index.html: README.rst render.sh
-	./render.sh --rst $< $@
+define PROCESSRST
+$(eval TITLE := $(shell echo '$(patsubst zips/%,%,$(basename $<))' | sed -E 's|zip-0{0,3}|ZIP |;s|draft-|Draft |')$(shell grep -E '^(\.\.)?\s*Title: ' $< |sed -E 's|.*Title||'))
+rst2html5 -v --title="$(TITLE)" $< >$@
+./edithtml.sh --rst $@
+endef
 
-rendered/%.html: zips/%.rst render.sh
-	./render.sh --rst $< $@
+define PROCESSMD
+$(eval TITLE := $(shell echo '$(patsubst zips/%,%,$(basename $<))' | sed -E 's|zip-0{0,3}|ZIP |;s|draft-|Draft |')$(shell grep -E '^(\.\.)?\s*Title: ' $< |sed -E 's|.*Title||'))
+pandoc --from=markdown --to=html $< --output=$@
+./edithtml.sh --md $@ "${TITLE}"
+endef
 
-rendered/%.html: zips/%.md render.sh
-	./render.sh $(MARKDOWN_OPTION) $< $@
+rendered/index.html: README.rst edithtml.sh
+	$(PROCESSRST)
+
+rendered/%.html: zips/%.rst edithtml.sh
+	$(PROCESSRST)
+
+rendered/%.html: zips/%.md edithtml.sh
+	$(PROCESSMD)
 
 README.rst: .zipfilelist.current .draftfilelist.current makeindex.sh README.template $(wildcard zips/zip-*.rst) $(wildcard zips/zip-*.md) $(wildcard zips/draft-*.rst) $(wildcard zips/draft-*.md)
 	./makeindex.sh | cat README.template - >README.rst
