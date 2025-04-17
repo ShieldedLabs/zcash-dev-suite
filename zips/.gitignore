@@ -19,14 +19,15 @@
 *.swp
 *.save
 *.save.*
-*~
-*.html.temp
 
 .Makefile.uptodate
 .zipfilelist.*
 .draftfilelist.*
 
-MultiMarkdown-6
-
 protocol/aux/
+protocol/html/
+protocol/saplinghtml/
+
+protocol/heartwood.pdf
 protocol/protocol.ver
+*~
